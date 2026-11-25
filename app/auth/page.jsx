@@ -4,6 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ArrowLeft, Shield, User, Mail, Lock, Smartphone, CheckCircle2, AlertCircle, Building2, ImageIcon } from 'lucide-react';
+import { supabase } from '@/lib/supabaseClient';
 
 export default function AuthPage() {
   const router = useRouter();
@@ -11,6 +12,7 @@ export default function AuthPage() {
   const [lang, setLang] = useState('EN');
   const [activeTab, setActiveTab] = useState('user'); // 'user' or 'admin'
   const [isSignUp, setIsSignUp] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Common Form Fields
   const [email, setEmail] = useState('');
@@ -61,140 +63,257 @@ export default function AuthPage() {
     setLang(savedLang);
   }, []);
 
-  const handleSubmit = (e) => {
+  const syncProfileToSupabase = async (authUser, profileData) => {
+    if (!authUser?.id) return;
+    const { error } = await supabase.from('profiles').upsert(
+      {
+        id: authUser.id,
+        email: authUser.email || profileData.email,
+        full_name: profileData.fullName || profileData.venueName || '',
+        phone: profileData.contactPhone || profileData.momoNumber || '',
+        role: profileData.role || 'user',
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'id' }
+    );
+    if (error) {
+      console.error('Supabase profile sync error:', error.message);
+    }
+  };
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setErrorMessage('');
     setSuccessMessage('');
+    setIsSubmitting(true);
 
-    if (activeTab === 'user') {
-      const savedUsers = localStorage.getItem('camernights_registered_users');
-      let registeredUsers = savedUsers ? JSON.parse(savedUsers) : [];
+    const normalizedEmail = email.trim().toLowerCase();
 
-      if (isSignUp) {
-        const userExists = registeredUsers.some(u => u.email === email.toLowerCase());
-        if (userExists) {
-          setErrorMessage(lang === 'FR' ? 'Cet e-mail est déjà utilisé.' : 'An account with this email already exists.');
-          return;
-        }
+    try {
+      if (activeTab === 'user') {
+        const savedUsers = localStorage.getItem('camernights_registered_users');
+        let registeredUsers = savedUsers ? JSON.parse(savedUsers) : [];
 
-        const newUser = {
-          id: 'USER-' + Date.now(),
-          fullName,
-          email: email.toLowerCase(),
-          password,
-          role: 'user',
-          isLoggedIn: true
-        };
+        if (isSignUp) {
+          const { data, error } = await supabase.auth.signUp({
+            email: normalizedEmail,
+            password,
+            options: {
+              data: {
+                full_name: fullName,
+                role: 'user',
+              },
+            },
+          });
 
-        registeredUsers.push(newUser);
-        localStorage.setItem('camernights_registered_users', JSON.stringify(registeredUsers));
-        localStorage.setItem('camernights_user_profile', JSON.stringify(newUser));
+          if (error) {
+            setErrorMessage(
+              error.message.toLowerCase().includes('already')
+                ? (lang === 'FR' ? 'Cet e-mail est déjà utilisé.' : 'An account with this email already exists.')
+                : error.message
+            );
+            return;
+          }
 
-        setSuccessMessage(lang === 'FR' ? 'Compte VIP créé ! Redirection...' : 'VIP Account created! Redirecting...');
-        setTimeout(() => router.push('/profile'), 1200);
-      } else {
-        const matchedUser = registeredUsers.find(
-          u => u.email === email.toLowerCase() && u.password === password
-        );
+          const supaUser = data?.user;
+          const newUser = {
+            id: supaUser?.id || ('USER-' + Date.now()),
+            fullName,
+            email: normalizedEmail,
+            role: 'user',
+            isLoggedIn: true,
+          };
 
-        if (matchedUser) {
-          matchedUser.isLoggedIn = true;
-          localStorage.setItem('camernights_user_profile', JSON.stringify(matchedUser));
+          if (supaUser) {
+            await syncProfileToSupabase(supaUser, newUser);
+          }
+
+          const existingIndex = registeredUsers.findIndex((u) => u.email === normalizedEmail);
+          if (existingIndex >= 0) {
+            registeredUsers[existingIndex] = newUser;
+          } else {
+            registeredUsers.push(newUser);
+          }
+
+          localStorage.setItem('camernights_registered_users', JSON.stringify(registeredUsers));
+          localStorage.setItem('camernights_user_profile', JSON.stringify(newUser));
+
+          setSuccessMessage(lang === 'FR' ? 'Compte VIP créé ! Redirection...' : 'VIP Account created! Redirecting...');
+          setTimeout(() => router.push('/profile'), 1200);
+        } else {
+          const { data, error } = await supabase.auth.signInWithPassword({
+            email: normalizedEmail,
+            password,
+          });
+
+          if (error || !data?.user) {
+            setErrorMessage(lang === 'FR' ? 'E-mail ou mot de passe incorrect.' : 'Incorrect email or password.');
+            return;
+          }
+
+          const supaUser = data.user;
+          const { data: dbProfile } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', supaUser.id)
+            .single();
+
+          const localMatch = registeredUsers.find((u) => u.email === normalizedEmail);
+          const signedInUser = {
+            id: supaUser.id,
+            fullName:
+              dbProfile?.full_name ||
+              supaUser.user_metadata?.full_name ||
+              localMatch?.fullName ||
+              normalizedEmail.split('@')[0],
+            email: supaUser.email || normalizedEmail,
+            phone: dbProfile?.phone || localMatch?.phone || '',
+            role: dbProfile?.role || 'user',
+            isLoggedIn: true,
+          };
+
+          await syncProfileToSupabase(supaUser, signedInUser);
+          localStorage.setItem('camernights_user_profile', JSON.stringify(signedInUser));
+
           setSuccessMessage(lang === 'FR' ? 'Connexion réussie !' : 'Signed in successfully!');
           setTimeout(() => router.push('/profile'), 1000);
-        } else {
-          setErrorMessage(lang === 'FR' ? 'E-mail ou mot de passe incorrect.' : 'Incorrect email or password.');
         }
-      }
-    } else {
-      // Admin / Manager Flow
-      const savedAdmins = localStorage.getItem('camernights_registered_admins');
-      let registeredAdmins = savedAdmins ? JSON.parse(savedAdmins) : [];
-
-      const savedVenues = localStorage.getItem('camernights_registered_venues');
-      let registeredVenues = savedVenues ? JSON.parse(savedVenues) : [];
-
-      if (isSignUp) {
-        if (!momoNumber || momoNumber.length < 9) {
-          setErrorMessage(lang === 'FR' ? 'Veuillez entrer un numéro Mobile Money valide.' : 'Please enter a valid Mobile Money number.');
-          return;
-        }
-
-        const adminExists = registeredAdmins.some(a => a.email === email.toLowerCase());
-        if (adminExists) {
-          setErrorMessage(lang === 'FR' ? 'Cet e-mail de gestionnaire existe déjà.' : 'A manager account with this email already exists.');
-          return;
-        }
-
-        const venueId = 'VEN-' + Date.now();
-        const newAdmin = {
-          id: venueId,
-          venueName,
-          city,
-          email: email.toLowerCase(),
-          password,
-          paymentMethod,
-          momoNumber,
-          contactPhone,
-          image: profileImage || 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000',
-          subscriptionStatus: 'ACTIVE',
-          role: 'admin',
-          isLoggedIn: true
-        };
-
-        const newVenueCard = {
-          id: venueId,
-          name: venueName,
-          city: city,
-          location: `${city} Centre, ${city}`,
-          category: 'VERIFIED VIP',
-          rating: 5.0,
-          reviewsCount: 1,
-          minSpend: '25,000 XAF',
-          tags: ['VIP Table Service', 'Bottle Service', 'Live DJ'],
-          image: profileImage || 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000'
-        };
-
-        registeredAdmins.push(newAdmin);
-        registeredVenues.push(newVenueCard);
-
-        localStorage.setItem('camernights_registered_admins', JSON.stringify(registeredAdmins));
-        localStorage.setItem('camernights_registered_venues', JSON.stringify(registeredVenues));
-        localStorage.setItem('camernights_admin_profile', JSON.stringify(newAdmin));
-
-        setSuccessMessage(lang === 'FR' ? `Paiement de 50,000 XAF envoyé au 676345078 & Compte créé !` : `Payment of 50,000 XAF sent to 676345078 & Club Registered!`);
-        setTimeout(() => router.push('/admin'), 1500);
       } else {
-        const matchedAdmin = registeredAdmins.find(
-          a => a.email === email.toLowerCase() && a.password === password
-        );
+        // Admin / Manager Flow
+        const savedAdmins = localStorage.getItem('camernights_registered_admins');
+        let registeredAdmins = savedAdmins ? JSON.parse(savedAdmins) : [];
 
-        if (!matchedAdmin && email.toLowerCase() === 'kddzbenz@gmail.com' && password === '123456') {
-          const defaultAdmin = {
-            id: '1',
-            venueName: 'CHATEAU VIP',
-            city: 'Buea',
-            email: 'kddzbenz@gmail.com',
-            password: '123456',
+        const savedVenues = localStorage.getItem('camernights_registered_venues');
+        let registeredVenues = savedVenues ? JSON.parse(savedVenues) : [];
+
+        if (isSignUp) {
+          if (!momoNumber || momoNumber.length < 9) {
+            setErrorMessage(lang === 'FR' ? 'Veuillez entrer un numéro Mobile Money valide.' : 'Please enter a valid Mobile Money number.');
+            return;
+          }
+
+          const { data, error } = await supabase.auth.signUp({
+            email: normalizedEmail,
+            password,
+            options: {
+              data: {
+                full_name: venueName,
+                venue_name: venueName,
+                city,
+                role: 'admin',
+              },
+            },
+          });
+
+          if (error) {
+            setErrorMessage(
+              error.message.toLowerCase().includes('already')
+                ? (lang === 'FR' ? 'Cet e-mail de gestionnaire existe déjà.' : 'A manager account with this email already exists.')
+                : error.message
+            );
+            return;
+          }
+
+          const supaUser = data?.user;
+          const venueId = 'VEN-' + Date.now();
+          const newAdmin = {
+            id: supaUser?.id || venueId,
+            venueId,
+            venueName,
+            city,
+            email: normalizedEmail,
+            paymentMethod,
+            momoNumber,
+            contactPhone,
+            image: profileImage || 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000',
+            subscriptionStatus: 'ACTIVE',
             role: 'admin',
             isLoggedIn: true,
-            image: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000'
           };
-          localStorage.setItem('camernights_admin_profile', JSON.stringify(defaultAdmin));
+
+          const newVenueCard = {
+            id: venueId,
+            name: venueName,
+            city: city,
+            location: `${city} Centre, ${city}`,
+            category: 'VERIFIED VIP',
+            rating: 5.0,
+            reviewsCount: 1,
+            minSpend: '25,000 XAF',
+            tags: ['VIP Table Service', 'Bottle Service', 'Live DJ'],
+            image: profileImage || 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000',
+          };
+
+          if (supaUser) {
+            await syncProfileToSupabase(supaUser, {
+              ...newAdmin,
+              fullName: venueName,
+            });
+          }
+
+          registeredAdmins.push(newAdmin);
+          registeredVenues.push(newVenueCard);
+
+          localStorage.setItem('camernights_registered_admins', JSON.stringify(registeredAdmins));
+          localStorage.setItem('camernights_registered_venues', JSON.stringify(registeredVenues));
+          localStorage.setItem('camernights_admin_profile', JSON.stringify(newAdmin));
+
+          setSuccessMessage(
+            lang === 'FR'
+              ? 'Paiement de 50,000 XAF envoyé au 676345078 & Compte créé !'
+              : 'Payment of 50,000 XAF sent to 676345078 & Club Registered!'
+          );
+          setTimeout(() => router.push('/admin'), 1500);
+        } else {
+          const { data, error } = await supabase.auth.signInWithPassword({
+            email: normalizedEmail,
+            password,
+          });
+
+          if (error || !data?.user) {
+            setErrorMessage(lang === 'FR' ? 'E-mail ou mot de passe de gestionnaire incorrect.' : 'Incorrect manager email or password.');
+            return;
+          }
+
+          const supaUser = data.user;
+          const { data: dbProfile } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('id', supaUser.id)
+            .single();
+
+          const localMatch = registeredAdmins.find((a) => a.email === normalizedEmail);
+          const signedInAdmin = localMatch
+            ? {
+                ...localMatch,
+                id: supaUser.id,
+                email: supaUser.email || normalizedEmail,
+                role: 'admin',
+                isLoggedIn: true,
+              }
+            : {
+                id: supaUser.id,
+                venueName: dbProfile?.full_name || supaUser.user_metadata?.venue_name || 'CHATEAU VIP',
+                city: supaUser.user_metadata?.city || 'Buea',
+                email: supaUser.email || normalizedEmail,
+                contactPhone: dbProfile?.phone || '',
+                role: 'admin',
+                isLoggedIn: true,
+                image: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000',
+              };
+
+          await syncProfileToSupabase(supaUser, {
+            ...signedInAdmin,
+            fullName: signedInAdmin.venueName,
+          });
+          localStorage.setItem('camernights_admin_profile', JSON.stringify(signedInAdmin));
+
           setSuccessMessage(lang === 'FR' ? 'Bienvenue, Gestionnaire !' : 'Welcome back, Manager!');
           setTimeout(() => router.push('/admin'), 1000);
-          return;
-        }
-
-        if (matchedAdmin) {
-          matchedAdmin.isLoggedIn = true;
-          localStorage.setItem('camernights_admin_profile', JSON.stringify(matchedAdmin));
-          setSuccessMessage(lang === 'FR' ? 'Connexion réussie !' : 'Signed in successfully!');
-          setTimeout(() => router.push('/admin'), 1000);
-        } else {
-          setErrorMessage(lang === 'FR' ? 'E-mail ou mot de passe de gestionnaire incorrect.' : 'Incorrect manager email or password.');
         }
       }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -447,11 +566,14 @@ export default function AuthPage() {
 
           <button
             type="submit"
-            className="w-full bg-[#E5B800] text-[#111319] font-black text-xs py-3.5 rounded-xl uppercase tracking-wider shadow-lg hover:bg-[#d4a800] transition mt-2"
+            disabled={isSubmitting}
+            className="w-full bg-[#E5B800] text-[#111319] font-black text-xs py-3.5 rounded-xl uppercase tracking-wider shadow-lg hover:bg-[#d4a800] transition mt-2 disabled:opacity-60"
           >
-            {isSignUp
-              ? (activeTab === 'admin' ? (lang === 'FR' ? 'PAYER 50,000 XAF AU 676345078 & S\'INSCRIRE' : 'PAY 50,000 XAF TO 676345078 & REGISTER') : (lang === 'FR' ? 'CRÉER LE COMPTE' : 'CREATE VIP ACCOUNT'))
-              : (lang === 'FR' ? 'SE CONNECTER' : 'SIGN IN')}
+            {isSubmitting
+              ? (lang === 'FR' ? 'TRAITEMENT...' : 'PROCESSING...')
+              : isSignUp
+                ? (activeTab === 'admin' ? (lang === 'FR' ? 'PAYER 50,000 XAF AU 676345078 & S\'INSCRIRE' : 'PAY 50,000 XAF TO 676345078 & REGISTER') : (lang === 'FR' ? 'CRÉER LE COMPTE' : 'CREATE VIP ACCOUNT'))
+                : (lang === 'FR' ? 'SE CONNECTER' : 'SIGN IN')}
           </button>
         </form>
 

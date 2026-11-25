@@ -1,9 +1,28 @@
 'use client';
 
-import React, { useState, useEffect, Suspense } from 'react';
-import { MapPin, Navigation, ChevronLeft, ShieldCheck, X, Star } from 'lucide-react';
+import React, { useState, useEffect, useCallback, Suspense } from 'react';
+import {
+  MapPin,
+  Navigation,
+  ChevronLeft,
+  ShieldCheck,
+  X,
+  Star,
+  Share2,
+  Check,
+} from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabaseClient';
+
+const formatXAFPrice = (rawValue) => {
+  if (rawValue === null || rawValue === undefined) return '';
+  const digitsOnly = String(rawValue).replace(/[^0-9]/g, '');
+  if (!digitsOnly) return '';
+  const numericAmount = Number(digitsOnly);
+  if (Number.isNaN(numericAmount)) return '';
+  return `${numericAmount.toLocaleString('en-US')} XAF`;
+};
 
 function VenueDetailContent() {
   const params = useParams();
@@ -14,6 +33,7 @@ function VenueDetailContent() {
   const [venue, setVenue] = useState(null);
   const [activeTab, setActiveTab] = useState('menu'); // 'menu', 'services', 'gallery', 'staff', 'events'
 
+  const [tables, setTables] = useState([]);
   const [drinks, setDrinks] = useState([]);
   const [services, setServices] = useState([]);
   const [gallery, setGallery] = useState([]);
@@ -22,6 +42,7 @@ function VenueDetailContent() {
   const [reviews, setReviews] = useState([]);
   const [newReviewText, setNewReviewText] = useState('');
   const [newReviewRating, setNewReviewRating] = useState(5);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedTable, setSelectedTable] = useState(null);
@@ -29,118 +50,306 @@ function VenueDetailContent() {
   const [bookingDate, setBookingDate] = useState('');
   const [bookingTime, setBookingTime] = useState('22:00');
 
+  const loadVenueData = useCallback(() => {
+    const savedVenues = JSON.parse(localStorage.getItem('camernights_registered_venues') || '[]');
+    let foundVenue = savedVenues.find((v) => String(v.id) === String(venueId)) || null;
+
+    let adminObj = null;
+    try {
+      adminObj = JSON.parse(localStorage.getItem('camernights_admin_profile') || 'null');
+    } catch {
+      adminObj = null;
+    }
+
+    const isOwnedByCurrentAdmin =
+      adminObj &&
+      (String(adminObj.venueId) === String(venueId) ||
+        (foundVenue &&
+          ((foundVenue.ownerId && String(foundVenue.ownerId) === String(adminObj.id)) ||
+            (foundVenue.ownerEmail &&
+              adminObj.email &&
+              String(foundVenue.ownerEmail).toLowerCase() ===
+                String(adminObj.email).toLowerCase()))));
+
+    if (!foundVenue && isOwnedByCurrentAdmin) {
+      foundVenue = {
+        id: venueId,
+        ownerId: adminObj.id,
+        ownerEmail: adminObj.email,
+        name: adminObj.venueName || 'NEW VIP VENUE',
+        location: `${adminObj.venueCity || adminObj.city || 'Buea'} Centre, Cameroon`,
+        category: 'CLUBS & NIGHTLIFE',
+        image:
+          adminObj.heroImage ||
+          adminObj.profilePic ||
+          adminObj.image ||
+          'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000',
+      };
+    } else if (!foundVenue) {
+      foundVenue = {
+        id: venueId,
+        name: 'VIP VENUE',
+        location: 'Cameroon',
+        category: 'CLUBS & NIGHTLIFE',
+        image:
+          'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000',
+      };
+    }
+
+    const adminImageOverride = isOwnedByCurrentAdmin
+      ? adminObj.heroImage || adminObj.profilePic || adminObj.image || ''
+      : '';
+
+    const normalizedVenue = {
+      ...foundVenue,
+      name:
+        (isOwnedByCurrentAdmin && adminObj?.venueName) || foundVenue.name || 'VIP VENUE',
+      location:
+        foundVenue.location ||
+        (foundVenue.city ? `${foundVenue.city} Centre, Cameroon` : 'Cameroon'),
+      image:
+        adminImageOverride ||
+        foundVenue.image ||
+        'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000',
+    };
+    setVenue(normalizedVenue);
+
+    const ownerScope =
+      normalizedVenue.ownerId ||
+      normalizedVenue.ownerEmail ||
+      (isOwnedByCurrentAdmin ? adminObj?.id || adminObj?.email : null);
+
+    const readScopedList = (suffix) => {
+      const byVenue = JSON.parse(
+        localStorage.getItem(`camernights_venue_${venueId}_${suffix}`) || 'null'
+      );
+      if (Array.isArray(byVenue)) return byVenue;
+
+      if (ownerScope) {
+        const byOwner = JSON.parse(
+          localStorage.getItem(
+            `camernights_admin_${String(ownerScope).toLowerCase()}_${suffix}`
+          ) || 'null'
+        );
+        if (Array.isArray(byOwner)) return byOwner;
+      }
+
+      return [];
+    };
+
+    const rawTables = readScopedList('tables');
+    const normalizedTables = rawTables.map((tbl) => ({
+      id: tbl.id,
+      name: tbl.name,
+      price: formatXAFPrice(tbl.price || tbl.minSpend) || '0 XAF',
+      status: tbl.status || 'Available',
+      image: tbl.image || '',
+      desc: tbl.desc || `${tbl.capacity || 'VIP seating'} at ${normalizedVenue.name}`,
+    }));
+    setTables(normalizedTables);
+
+    setDrinks(readScopedList('drinks'));
+    setServices(readScopedList('services'));
+    setGallery(readScopedList('gallery'));
+
+    const rawStaff = readScopedList('staff');
+    const normalizedStaff = rawStaff.map((s) => ({
+      ...s,
+      photo:
+        s.photo ||
+        s.photoUrl ||
+        s.image ||
+        'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400',
+    }));
+    setStaff(normalizedStaff);
+
+    setEvents(readScopedList('events'));
+
+    const savedReviews = JSON.parse(
+      localStorage.getItem(`camernights_reviews_${venueId}`) || '[]'
+    );
+    setReviews(savedReviews);
+  }, [venueId]);
+
   useEffect(() => {
     const savedLang = localStorage.getItem('camernights_lang');
     if (savedLang) setLang(savedLang);
 
     loadVenueData();
 
-    const handleStorageChange = () => loadVenueData();
+    const handleStorageChange = () => {
+      const latestLang = localStorage.getItem('camernights_lang');
+      if (latestLang) setLang(latestLang);
+      loadVenueData();
+    };
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
-  }, [venueId]);
+  }, [loadVenueData]);
 
-  const loadVenueData = () => {
-    const savedVenues = localStorage.getItem('camernights_registered_venues');
-    let foundVenue = null;
-    if (savedVenues) {
-      const parsed = JSON.parse(savedVenues);
-      foundVenue = parsed.find(v => v.id === venueId);
+  const getActiveGuestSession = async () => {
+    let cachedUser = null;
+    try {
+      cachedUser = JSON.parse(localStorage.getItem('camernights_user_profile') || 'null');
+    } catch {
+      cachedUser = null;
     }
 
-    const savedAdmin = localStorage.getItem('camernights_admin_profile');
-    let adminProfilePic = '';
-    if (savedAdmin) {
-      const admin = JSON.parse(savedAdmin);
-      adminProfilePic = admin.heroImage || admin.profilePic || admin.image || '';
-      if (venueId === '1' || (foundVenue && foundVenue.name.toLowerCase() === admin.venueName.toLowerCase())) {
-        if (!foundVenue) foundVenue = {};
-        foundVenue.name = admin.venueName;
-        foundVenue.location = `${admin.venueCity || 'Buea'} Centre, Cameroon`;
-      }
-    }
+    const { data } = await supabase.auth.getSession();
+    const supaUser = data?.session?.user || null;
 
-    if (!foundVenue) {
-      foundVenue = {
-        id: venueId,
-        name: 'LE CHATEAU CLUB',
-        location: 'Buea Centre, Cameroon',
-        category: 'CLUBS & NIGHTLIFE',
-        image: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000'
+    if (supaUser) {
+      return {
+        id: supaUser.id,
+        name:
+          cachedUser?.name ||
+          supaUser.user_metadata?.full_name ||
+          supaUser.email?.split('@')[0] ||
+          'VIP Partygoer',
+        email: supaUser.email || cachedUser?.email || '',
+        isLoggedIn: true,
       };
     }
 
-    foundVenue.image = adminProfilePic || foundVenue.image || 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?auto=format&fit=crop&q=80&w=1000';
-    setVenue(foundVenue);
+    if (cachedUser && cachedUser.isLoggedIn) {
+      return cachedUser;
+    }
 
-    setDrinks(JSON.parse(localStorage.getItem('camernights_chateau_drinks') || '[]'));
-    setServices(JSON.parse(localStorage.getItem('camernights_chateau_services') || '[]'));
-    
-    const savedGallery = localStorage.getItem(`camernights_gallery_${venueId}`) || localStorage.getItem('camernights_gallery_1') || '[]';
-    setGallery(JSON.parse(savedGallery));
-
-    const rawStaff = JSON.parse(localStorage.getItem(`camernights_staff_${venueId}`) || localStorage.getItem('camernights_staff_1') || '[]');
-    const normalizedStaff = rawStaff.map(s => ({
-      ...s,
-      photo: s.photo || s.photoUrl || s.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400'
-    }));
-    setStaff(normalizedStaff);
-
-    const savedEvents = localStorage.getItem(`camernights_events_${venueId}`) || localStorage.getItem('camernights_events_1') || '[]';
-    setEvents(JSON.parse(savedEvents));
-
-    const savedReviews = JSON.parse(localStorage.getItem(`camernights_reviews_${venueId}`) || JSON.stringify([
-      { id: 1, author: 'Valerie M.', rating: 5, comment: 'Unmatched VVIP service in Buea! The bottle sparklers and atmosphere are top tier.', date: '2026-02-18' }
-    ]));
-    setReviews(savedReviews);
+    return null;
   };
 
-  const handleOpenBooking = (tableName, tablePrice) => {
-    const userProfile = localStorage.getItem('camernights_user_profile');
-    if (!userProfile) {
-      alert(lang === 'EN' ? 'Please log in or sign up before reserving VIP tables!' : 'Veuillez vous connecter ou vous inscrire avant de réserver des tables VIP !');
+  const handleShareVenuePage = async () => {
+    const shareUrl =
+      typeof window !== 'undefined' ? window.location.href : `/venue/${venueId}`;
+    const shareTitle = `${venue?.name || 'VIP Venue'} — CAMERNIGHTS`;
+
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try {
+        await navigator.share({ title: shareTitle, url: shareUrl });
+        return;
+      } catch {
+        // Fall back to clipboard copy
+      }
+    }
+
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl);
+      }
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+    } catch {
+      setCopiedLink(false);
+    }
+  };
+
+  const handleOpenBooking = async (tableObj) => {
+    const activeGuest = await getActiveGuestSession();
+    if (!activeGuest) {
+      alert(
+        lang === 'EN'
+          ? 'Please log in or sign up before reserving VIP tables!'
+          : 'Veuillez vous connecter ou vous inscrire avant de réserver des tables VIP !'
+      );
       router.push('/auth?role=user');
       return;
     }
-    setSelectedTable({ name: tableName, price: tablePrice });
+    setSelectedTable({
+      name: tableObj.name,
+      price: tableObj.price,
+      image: tableObj.image || '',
+      desc: tableObj.desc || '',
+    });
     setIsModalOpen(true);
   };
 
-  const handleConfirmReservation = (e) => {
+  const handleConfirmReservation = async (e) => {
     e.preventDefault();
+    const activeGuest = await getActiveGuestSession();
+    if (!activeGuest) {
+      setIsModalOpen(false);
+      router.push('/auth?role=user');
+      return;
+    }
+
+    let adminObj = null;
+    try {
+      adminObj = JSON.parse(localStorage.getItem('camernights_admin_profile') || 'null');
+    } catch {
+      adminObj = null;
+    }
+
     const newBooking = {
       id: `RES-${Math.floor(1000 + Math.random() * 9000)}`,
+      userId: activeGuest.id || '',
+      userEmail: activeGuest.email || '',
+      userName: activeGuest.name || activeGuest.email || 'VIP Partygoer',
+      venueId: venue.id,
       venueName: venue.name,
       venueCity: venue.location,
+      managerContact: venue.contactPhone || adminObj?.contactPhone || '+237676345078',
       tableType: selectedTable.name,
       guests: guestCount,
-      date: bookingDate || 'Today',
+      date: bookingDate || new Date().toISOString().split('T')[0],
       time: bookingTime,
       price: selectedTable.price,
       status: 'Pending',
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     };
 
-    const existingBookings = JSON.parse(localStorage.getItem('camernights_admin_bookings') || '[]');
-    const updatedBookings = [newBooking, ...existingBookings];
-    localStorage.setItem('camernights_admin_bookings', JSON.stringify(updatedBookings));
+    if (activeGuest.email) {
+      const userKey = `camernights_user_bookings_${activeGuest.email.toLowerCase()}`;
+      const existingPersonal = JSON.parse(localStorage.getItem(userKey) || '[]');
+      localStorage.setItem(userKey, JSON.stringify([newBooking, ...existingPersonal]));
+    }
+    const existingGeneralUserBookings = JSON.parse(
+      localStorage.getItem('camernights_user_bookings') || '[]'
+    );
+    localStorage.setItem(
+      'camernights_user_bookings',
+      JSON.stringify([newBooking, ...existingGeneralUserBookings])
+    );
+
+    const managerScope =
+      venue.ownerId ||
+      venue.ownerEmail ||
+      (adminObj &&
+        (String(adminObj.venueId) === String(venue.id) ||
+          adminObj.venueName?.toLowerCase() === venue.name?.toLowerCase())
+        ? adminObj.id || adminObj.email
+        : null);
+
+    if (managerScope) {
+      const adminBookingsKey = `camernights_admin_${String(managerScope).toLowerCase()}_bookings`;
+      const existingAdminBookings = JSON.parse(localStorage.getItem(adminBookingsKey) || '[]');
+      localStorage.setItem(
+        adminBookingsKey,
+        JSON.stringify([newBooking, ...existingAdminBookings])
+      );
+    }
+
     window.dispatchEvent(new Event('camernights_new_booking'));
+    window.dispatchEvent(new Event('camernights_booking_updated'));
 
     setIsModalOpen(false);
-    alert(lang === 'EN' ? 'VVIP Table Reservation Request Sent successfully!' : 'Demande de réservation de table VVIP envoyée avec succès !');
+    alert(
+      lang === 'EN'
+        ? 'VVIP Table Reservation Request Sent successfully!'
+        : 'Demande de réservation de table VVIP envoyée avec succès !'
+    );
     router.push('/bookings');
   };
 
-  const handleAddReview = (e) => {
+  const handleAddReview = async (e) => {
     e.preventDefault();
     if (!newReviewText.trim()) return;
-    const userProfile = JSON.parse(localStorage.getItem('camernights_user_profile') || '{}');
+
+    const activeGuest = await getActiveGuestSession();
     const newReview = {
       id: Date.now(),
-      author: userProfile.name || userProfile.email || 'Anonymous Partygoer',
+      author: activeGuest?.name || activeGuest?.email || 'Verified Partygoer',
       rating: Number(newReviewRating),
-      comment: newReviewText,
-      date: new Date().toISOString().split('T')[0]
+      comment: newReviewText.trim(),
+      date: new Date().toISOString().split('T')[0],
     };
     const updatedReviews = [newReview, ...reviews];
     setReviews(updatedReviews);
@@ -151,7 +360,10 @@ function VenueDetailContent() {
 
   if (!venue) return null;
 
-  const averageRating = reviews.length > 0 ? (reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length).toFixed(1) : '5.0';
+  const averageRating =
+    reviews.length > 0
+      ? (reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length).toFixed(1)
+      : '0.0';
 
   const t = {
     EN: {
@@ -160,6 +372,8 @@ function VenueDetailContent() {
       minSpend: 'Minimum Spend',
       reserveBtn: 'Book Table',
       gps: 'GPS Directions',
+      share: 'Share Club',
+      copied: 'Link Copied',
       menuTab: 'Bottle Menu',
       servicesTab: 'Special Services',
       galleryTab: 'Photo Gallery',
@@ -169,7 +383,7 @@ function VenueDetailContent() {
       confirmBooking: 'Confirm VVIP Reservation',
       reviewsHeader: 'CUSTOMER REVIEWS & RATINGS',
       writeReview: 'Leave a Review',
-      submitReview: 'Publish Review'
+      submitReview: 'Publish Review',
     },
     FR: {
       back: 'Retour',
@@ -177,6 +391,8 @@ function VenueDetailContent() {
       minSpend: 'Consommation Minimum',
       reserveBtn: 'Réserver',
       gps: 'Itinéraire GPS',
+      share: 'Partager',
+      copied: 'Lien Copié',
       menuTab: 'Menu Bouteilles',
       servicesTab: 'Services Spéciaux',
       galleryTab: 'Galerie Photo',
@@ -186,15 +402,9 @@ function VenueDetailContent() {
       confirmBooking: 'Confirmer la Réservation VVIP',
       reviewsHeader: 'AVIS & NOTATIONS CLIENTS',
       writeReview: 'Laisser un avis',
-      submitReview: "Publier l'avis"
-    }
+      submitReview: "Publier l'avis",
+    },
   }[lang];
-
-  const tables = [
-    { name: 'Royal VVIP Booth', price: '75,000 XAF', desc: 'Private elevated booth facing main DJ booth with bottle sparklers' },
-    { name: 'VIP Dancefloor Table', price: '45,000 XAF', desc: 'Prime seating right next to the dancefloor action' },
-    { name: 'Standard VIP Lounge', price: '25,000 XAF', desc: 'Comfortable luxury seating for groups up to 4' }
-  ];
 
   return (
     <div className="w-full min-h-screen bg-[#111319] text-[#F5F5F7] font-sans pb-32 select-none">
@@ -203,11 +413,14 @@ function VenueDetailContent() {
         <div className="absolute inset-0 bg-gradient-to-t from-[#111319] via-black/40 to-transparent" />
 
         <div className="absolute top-4 left-4 right-4 flex items-center justify-between">
-          <Link href="/" className="bg-[#12141C]/80 backdrop-blur-md border border-[#222634] text-[#E5B800] p-2.5 rounded-2xl flex items-center gap-2 hover:bg-[#12141C] transition">
+          <Link
+            href="/"
+            className="bg-[#12141C]/80 backdrop-blur-md border border-[#222634] text-[#E5B800] p-2.5 rounded-2xl flex items-center gap-2 hover:bg-[#12141C] transition"
+          >
             <ChevronLeft size={16} />
             <span>{t.back}</span>
           </Link>
-          
+
           <span className="bg-[#E5B800] text-[#12141C] text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-wider flex items-center gap-1 shadow-lg">
             <ShieldCheck size={13} /> VERIFIED
           </span>
@@ -220,7 +433,9 @@ function VenueDetailContent() {
             </span>
             <div className="flex items-center gap-1 bg-[#12141C]/80 px-2.5 py-0.5 rounded-full border border-[#222634]">
               <Star size={12} className="text-[#E5B800] fill-[#E5B800]" />
-              <span className="text-[10px] font-black text-white">{averageRating} ({reviews.length} reviews)</span>
+              <span className="text-[10px] font-black text-white">
+                {averageRating} ({reviews.length} reviews)
+              </span>
             </div>
           </div>
           <h1 className="text-2xl sm:text-4xl font-serif font-black text-white">{venue.name}</h1>
@@ -233,7 +448,9 @@ function VenueDetailContent() {
       <main className="max-w-4xl mx-auto px-4 pt-6 space-y-6">
         <div className="flex gap-3">
           <a
-            href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(venue.name + ' ' + venue.location)}`}
+            href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+              venue.name + ' ' + venue.location
+            )}`}
             target="_blank"
             rel="noopener noreferrer"
             className="flex-1 bg-[#181B26] border border-[#282E3E] hover:border-[#E5B800] text-white font-bold text-xs py-3.5 px-4 rounded-2xl flex items-center justify-center gap-2 transition shadow-xl"
@@ -241,106 +458,254 @@ function VenueDetailContent() {
             <Navigation size={15} className="text-[#E5B800]" />
             <span>{t.gps}</span>
           </a>
+          <button
+            type="button"
+            onClick={handleShareVenuePage}
+            className="bg-[#181B26] border border-[#282E3E] hover:border-[#E5B800] text-white font-bold text-xs py-3.5 px-4 rounded-2xl flex items-center justify-center gap-2 transition shadow-xl"
+          >
+            {copiedLink ? (
+              <>
+                <Check size={15} className="text-[#E5B800]" />
+                <span className="text-[#E5B800]">{t.copied}</span>
+              </>
+            ) : (
+              <>
+                <Share2 size={15} className="text-[#E5B800]" />
+                <span>{t.share}</span>
+              </>
+            )}
+          </button>
         </div>
 
         <div className="bg-[#181B26] p-1.5 rounded-2xl border border-[#282E3E] grid grid-cols-2 sm:grid-cols-5 gap-1 text-center">
-          <button onClick={() => setActiveTab('menu')} className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${activeTab === 'menu' ? 'bg-[#E5B800] text-[#12141C] shadow-md' : 'text-[#828B9E] hover:text-white'}`}>{t.menuTab}</button>
-          <button onClick={() => setActiveTab('services')} className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${activeTab === 'services' ? 'bg-[#E5B800] text-[#12141C] shadow-md' : 'text-[#828B9E] hover:text-white'}`}>{t.servicesTab}</button>
-          <button onClick={() => setActiveTab('gallery')} className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${activeTab === 'gallery' ? 'bg-[#E5B800] text-[#12141C] shadow-md' : 'text-[#828B9E] hover:text-white'}`}>{t.galleryTab} ({gallery.length})</button>
-          <button onClick={() => setActiveTab('staff')} className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${activeTab === 'staff' ? 'bg-[#E5B800] text-[#12141C] shadow-md' : 'text-[#828B9E] hover:text-white'}`}>{t.staffTab} ({staff.length})</button>
-          <button onClick={() => setActiveTab('events')} className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${activeTab === 'events' ? 'bg-[#E5B800] text-[#12141C] shadow-md' : 'text-[#828B9E] hover:text-white'}`}>{t.eventsTab} ({events.length})</button>
+          <button
+            onClick={() => setActiveTab('menu')}
+            className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${
+              activeTab === 'menu'
+                ? 'bg-[#E5B800] text-[#12141C] shadow-md'
+                : 'text-[#828B9E] hover:text-white'
+            }`}
+          >
+            {t.menuTab}
+          </button>
+          <button
+            onClick={() => setActiveTab('services')}
+            className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${
+              activeTab === 'services'
+                ? 'bg-[#E5B800] text-[#12141C] shadow-md'
+                : 'text-[#828B9E] hover:text-white'
+            }`}
+          >
+            {t.servicesTab}
+          </button>
+          <button
+            onClick={() => setActiveTab('gallery')}
+            className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${
+              activeTab === 'gallery'
+                ? 'bg-[#E5B800] text-[#12141C] shadow-md'
+                : 'text-[#828B9E] hover:text-white'
+            }`}
+          >
+            {t.galleryTab} ({gallery.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('staff')}
+            className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${
+              activeTab === 'staff'
+                ? 'bg-[#E5B800] text-[#12141C] shadow-md'
+                : 'text-[#828B9E] hover:text-white'
+            }`}
+          >
+            {t.staffTab} ({staff.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('events')}
+            className={`py-2.5 rounded-xl text-[11px] font-black tracking-wider transition ${
+              activeTab === 'events'
+                ? 'bg-[#E5B800] text-[#12141C] shadow-md'
+                : 'text-[#828B9E] hover:text-white'
+            }`}
+          >
+            {t.eventsTab} ({events.length})
+          </button>
         </div>
 
         {activeTab === 'menu' && (
           <div className="space-y-6">
             <div className="space-y-4">
-              <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">{t.tablesHeader}</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                {tables.map((tbl, idx) => (
-                  <div key={idx} className="bg-[#181B26] border border-[#282E3E] rounded-3xl p-5 space-y-4 shadow-xl flex flex-col justify-between">
-                    <div>
-                      <h3 className="text-sm font-serif font-black text-white">{tbl.name}</h3>
-                      <p className="text-[10px] text-[#828B9E] mt-1">{tbl.desc}</p>
-                    </div>
-                    <div className="pt-2 border-t border-[#282E3E] flex items-center justify-between">
+              <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">
+                {t.tablesHeader} ({tables.length})
+              </h2>
+              {tables.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  {tables.map((tbl, idx) => (
+                    <div
+                      key={tbl.id || idx}
+                      className="bg-[#181B26] border border-[#282E3E] rounded-3xl p-5 space-y-4 shadow-xl flex flex-col justify-between"
+                    >
                       <div>
-                        <span className="text-[9px] uppercase text-[#828B9E] block">{t.minSpend}</span>
-                        <span className="text-sm font-black text-[#E5B800]">{tbl.price}</span>
+                        {tbl.image && (
+                          <img
+                            src={tbl.image}
+                            alt={tbl.name}
+                            className="w-full h-32 rounded-2xl object-cover mb-3 border border-[#282E3E]"
+                          />
+                        )}
+                        <div className="flex items-center justify-between gap-2">
+                          <h3 className="text-sm font-serif font-black text-white">{tbl.name}</h3>
+                          <span
+                            className={`text-[9px] font-black px-2 py-0.5 rounded-full uppercase ${
+                              tbl.status === 'Reserved'
+                                ? 'bg-rose-500/20 text-rose-400'
+                                : 'bg-emerald-500/20 text-emerald-400'
+                            }`}
+                          >
+                            {tbl.status || 'Available'}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-[#828B9E] mt-1">{tbl.desc}</p>
                       </div>
-                      <button onClick={() => handleOpenBooking(tbl.name, tbl.price)} className="bg-[#E5B800] hover:bg-[#d4a800] text-[#12141C] font-black text-xs px-4 py-2.5 rounded-xl uppercase tracking-wider transition shadow-lg">{t.reserveBtn}</button>
+                      <div className="pt-2 border-t border-[#282E3E] flex items-center justify-between">
+                        <div>
+                          <span className="text-[9px] uppercase text-[#828B9E] block">
+                            {t.minSpend}
+                          </span>
+                          <span className="text-sm font-black text-[#E5B800]">{tbl.price}</span>
+                        </div>
+                        <button
+                          onClick={() => handleOpenBooking(tbl)}
+                          className="bg-[#E5B800] hover:bg-[#d4a800] text-[#12141C] font-black text-xs px-4 py-2.5 rounded-xl uppercase tracking-wider transition shadow-lg"
+                        >
+                          {t.reserveBtn}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-[#828B9E] text-center py-6 bg-[#181B26] border border-[#282E3E] rounded-2xl">
+                  No tables published for this venue yet.
+                </p>
+              )}
             </div>
 
             <div className="space-y-4 pt-4">
-              <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">PUBLISHED BOTTLES & DRINKS ({drinks.length})</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {drinks.map((d, i) => (
-                  <div key={d.id || i} className="bg-[#181B26] border border-[#282E3E] rounded-2xl p-3.5 flex items-center justify-between shadow-lg">
-                    <div className="flex items-center gap-3">
-                      {d.image || d.photoUrl ? (
-                        <img src={d.image || d.photoUrl} alt="Bottle" className="w-12 h-12 rounded-xl object-cover" />
-                      ) : (
-                        <div className="w-12 h-12 rounded-xl bg-[#12141C] flex items-center justify-center font-bold text-xs text-[#E5B800]">🍾</div>
-                      )}
-                      <div>
-                        <h4 className="text-xs font-bold text-white">{d.name}</h4>
-                        <span className="text-[10px] text-[#828B9E] uppercase">{d.category}</span>
+              <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">
+                PUBLISHED BOTTLES & DRINKS ({drinks.length})
+              </h2>
+              {drinks.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {drinks.map((d, i) => (
+                    <div
+                      key={d.id || i}
+                      className="bg-[#181B26] border border-[#282E3E] rounded-2xl p-3.5 flex items-center justify-between shadow-lg"
+                    >
+                      <div className="flex items-center gap-3">
+                        {d.image || d.photoUrl ? (
+                          <img
+                            src={d.image || d.photoUrl}
+                            alt="Bottle"
+                            className="w-12 h-12 rounded-xl object-cover"
+                          />
+                        ) : (
+                          <div className="w-12 h-12 rounded-xl bg-[#12141C] flex items-center justify-center font-bold text-xs text-[#E5B800]">
+                            🍾
+                          </div>
+                        )}
+                        <div>
+                          <h4 className="text-xs font-bold text-white">{d.name}</h4>
+                          <span className="text-[10px] text-[#828B9E] uppercase">{d.category}</span>
+                        </div>
                       </div>
+                      <span className="text-xs font-black text-[#E5B800]">
+                        {formatXAFPrice(d.price) || d.price}
+                      </span>
                     </div>
-                    <span className="text-xs font-black text-[#E5B800]">{d.price}</span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-[#828B9E] text-center py-8">
+                  No bottles published for this venue yet.
+                </p>
+              )}
             </div>
           </div>
         )}
 
         {activeTab === 'services' && (
           <div className="space-y-4">
-            <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">SPECIAL VIP SERVICES ({services.length})</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {services.map((s, i) => (
-                <div key={s.id || i} className="bg-[#181B26] border border-[#282E3E] rounded-2xl p-4 flex justify-between items-start shadow-lg">
-                  <div>
-                    <h3 className="text-xs font-bold text-white">{s.name}</h3>
-                    <p className="text-[10px] text-[#828B9E] mt-0.5">{s.description}</p>
+            <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">
+              SPECIAL VIP SERVICES ({services.length})
+            </h2>
+            {services.length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {services.map((s, i) => (
+                  <div
+                    key={s.id || i}
+                    className="bg-[#181B26] border border-[#282E3E] rounded-2xl p-4 flex justify-between items-start shadow-lg"
+                  >
+                    <div>
+                      <h3 className="text-xs font-bold text-white">{s.name}</h3>
+                      <p className="text-[10px] text-[#828B9E] mt-0.5">{s.description}</p>
+                    </div>
+                    <span className="text-xs font-black text-[#E5B800]">
+                      {formatXAFPrice(s.price) || s.price}
+                    </span>
                   </div>
-                  <span className="text-xs font-black text-[#E5B800]">{s.price}</span>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-[#828B9E] text-center py-12">
+                No special services published for this venue yet.
+              </p>
+            )}
           </div>
         )}
 
         {activeTab === 'gallery' && (
           <div className="space-y-4">
-            <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">CLUB PHOTO GALLERY ({gallery.length})</h2>
+            <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">
+              CLUB PHOTO GALLERY ({gallery.length})
+            </h2>
             {gallery.length > 0 ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {gallery.map((g, idx) => (
-                  <div key={g.id || idx} className="bg-[#181B26] border border-[#282E3E] rounded-2xl overflow-hidden shadow-lg">
+                  <div
+                    key={g.id || idx}
+                    className="bg-[#181B26] border border-[#282E3E] rounded-2xl overflow-hidden shadow-lg"
+                  >
                     <img src={g.url} alt="Gallery" className="w-full h-32 object-cover" />
-                    {g.caption && <p className="text-[10px] p-2 text-white truncate font-bold">{g.caption}</p>}
+                    {g.caption && (
+                      <p className="text-[10px] p-2 text-white truncate font-bold">{g.caption}</p>
+                    )}
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-[#828B9E] text-center py-16">No gallery photos uploaded yet.</p>
+              <p className="text-xs text-[#828B9E] text-center py-16">
+                No gallery photos uploaded for this venue yet.
+              </p>
             )}
           </div>
         )}
 
         {activeTab === 'staff' && (
           <div className="space-y-4">
-            <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">MEET OUR STAFF & MANAGEMENT ({staff.length})</h2>
+            <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">
+              MEET OUR STAFF & MANAGEMENT ({staff.length})
+            </h2>
             {staff.length > 0 ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {staff.map((st, idx) => (
-                  <div key={st.id || idx} className="bg-[#181B26] border border-[#282E3E] rounded-2xl p-4 flex items-center gap-3 shadow-lg">
-                    <img src={st.photo} alt={st.name} className="w-14 h-14 rounded-2xl object-cover border border-[#E5B800]/40" />
+                  <div
+                    key={st.id || idx}
+                    className="bg-[#181B26] border border-[#282E3E] rounded-2xl p-4 flex items-center gap-3 shadow-lg"
+                  >
+                    <img
+                      src={st.photo}
+                      alt={st.name}
+                      className="w-14 h-14 rounded-2xl object-cover border border-[#E5B800]/40"
+                    />
                     <div>
                       <h3 className="text-xs font-bold text-white">{st.name}</h3>
                       <p className="text-[10px] text-[#E5B800] font-semibold mt-0.5">{st.role}</p>
@@ -349,30 +714,47 @@ function VenueDetailContent() {
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-[#828B9E] text-center py-16">No staff members added yet.</p>
+              <p className="text-xs text-[#828B9E] text-center py-16">
+                No staff members added for this venue yet.
+              </p>
             )}
           </div>
         )}
 
-        {/* TAB: EVENTS SECTION */}
         {activeTab === 'events' && (
           <div className="space-y-4">
-            <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">UPCOMING EVENTS ({events.length})</h2>
+            <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">
+              UPCOMING EVENTS ({events.length})
+            </h2>
             {events.length > 0 ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {events.map((ev, idx) => (
-                  <div key={ev.id || idx} className="bg-[#181B26] border border-[#282E3E] rounded-2xl p-4 space-y-1 shadow-lg">
+                  <div
+                    key={ev.id || idx}
+                    className="bg-[#181B26] border border-[#282E3E] rounded-2xl p-4 space-y-1 shadow-lg"
+                  >
                     <div className="flex justify-between items-start">
                       <h3 className="text-xs font-bold text-white">{ev.title}</h3>
-                      <span className="text-xs font-black text-[#E5B800]">{ev.price}</span>
+                      <span className="text-xs font-black text-[#E5B800]">
+                        {formatXAFPrice(ev.price) || ev.price}
+                      </span>
                     </div>
-                    <p className="text-[10px] text-[#828B9E]">📅 Date: <span className="text-white font-semibold">{ev.date}</span></p>
-                    {ev.dj && <p className="text-[10px] text-[#828B9E]">🎤 DJ / Artist: <span className="text-[#E5B800] font-bold">{ev.dj}</span></p>}
+                    <p className="text-[10px] text-[#828B9E]">
+                      📅 Date: <span className="text-white font-semibold">{ev.date}</span>
+                    </p>
+                    {ev.dj && (
+                      <p className="text-[10px] text-[#828B9E]">
+                        🎤 DJ / Artist:{' '}
+                        <span className="text-[#E5B800] font-bold">{ev.dj}</span>
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-[#828B9E] text-center py-16">No events added yet.</p>
+              <p className="text-xs text-[#828B9E] text-center py-16">
+                No events added for this venue yet.
+              </p>
             )}
           </div>
         )}
@@ -380,8 +762,12 @@ function VenueDetailContent() {
         <div className="bg-[#181B26] border border-[#282E3E] rounded-3xl p-6 space-y-6 shadow-xl mt-8">
           <div className="flex justify-between items-center border-b border-[#282E3E] pb-4">
             <div>
-              <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">{t.reviewsHeader}</h2>
-              <p className="text-[10px] text-[#828B9E] mt-0.5">Real feedback from verified Cameroonian partygoers</p>
+              <h2 className="text-xs font-serif font-black text-[#E5B800] tracking-widest uppercase">
+                {t.reviewsHeader}
+              </h2>
+              <p className="text-[10px] text-[#828B9E] mt-0.5">
+                Real feedback from verified Cameroonian partygoers
+              </p>
             </div>
             <div className="flex items-center gap-1.5 bg-[#12141C] px-3 py-1.5 rounded-xl border border-[#282E3E]">
               <Star size={14} className="text-[#E5B800] fill-[#E5B800]" />
@@ -389,36 +775,61 @@ function VenueDetailContent() {
             </div>
           </div>
 
-          <div className="space-y-3">
-            {reviews.map((rev) => (
-              <div key={rev.id} className="bg-[#12141C] border border-[#282E3E] rounded-2xl p-4 space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-black text-white">{rev.author}</span>
-                  <div className="flex items-center gap-1">
-                    {[...Array(rev.rating)].map((_, i) => (
-                      <Star key={i} size={10} className="text-[#E5B800] fill-[#E5B800]" />
-                    ))}
-                    <span className="text-[10px] text-[#828B9E] ml-2">{rev.date}</span>
+          {reviews.length > 0 ? (
+            <div className="space-y-3">
+              {reviews.map((rev) => (
+                <div
+                  key={rev.id}
+                  className="bg-[#12141C] border border-[#282E3E] rounded-2xl p-4 space-y-2"
+                >
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-black text-white">{rev.author}</span>
+                    <div className="flex items-center gap-1">
+                      {[...Array(rev.rating)].map((_, i) => (
+                        <Star key={i} size={10} className="text-[#E5B800] fill-[#E5B800]" />
+                      ))}
+                      <span className="text-[10px] text-[#828B9E] ml-2">{rev.date}</span>
+                    </div>
                   </div>
+                  <p className="text-xs text-[#9DA4B4]">{rev.comment}</p>
                 </div>
-                <p className="text-xs text-[#9DA4B4]">{rev.comment}</p>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-[#828B9E] text-center py-4">
+              No reviews yet. Be the first to share your experience!
+            </p>
+          )}
 
           <form onSubmit={handleAddReview} className="space-y-3 pt-4 border-t border-[#282E3E] text-xs">
             <h3 className="font-serif font-black text-white text-xs">{t.writeReview}</h3>
             <div className="flex gap-3">
-              <select value={newReviewRating} onChange={(e) => setNewReviewRating(e.target.value)} className="bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]">
+              <select
+                value={newReviewRating}
+                onChange={(e) => setNewReviewRating(e.target.value)}
+                className="bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]"
+              >
                 <option value="5">⭐⭐⭐⭐⭐ (5/5)</option>
                 <option value="4">⭐⭐⭐⭐ (4/5)</option>
                 <option value="3">⭐⭐⭐ (3/5)</option>
                 <option value="2">⭐⭐ (2/5)</option>
                 <option value="1">⭐ (1/5)</option>
               </select>
-              <input type="text" required placeholder="Share your nightlife experience..." value={newReviewText} onChange={(e) => setNewReviewText(e.target.value)} className="flex-1 bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]" />
+              <input
+                type="text"
+                required
+                placeholder="Share your nightlife experience..."
+                value={newReviewText}
+                onChange={(e) => setNewReviewText(e.target.value)}
+                className="flex-1 bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]"
+              />
             </div>
-            <button type="submit" className="w-full bg-[#E5B800] hover:bg-[#d4a800] text-[#12141C] font-black text-xs py-3 rounded-xl uppercase tracking-wider transition shadow-lg">{t.submitReview}</button>
+            <button
+              type="submit"
+              className="w-full bg-[#E5B800] hover:bg-[#d4a800] text-[#12141C] font-black text-xs py-3 rounded-xl uppercase tracking-wider transition shadow-lg"
+            >
+              {t.submitReview}
+            </button>
           </form>
         </div>
       </main>
@@ -427,17 +838,42 @@ function VenueDetailContent() {
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#181B26] border border-[#282E3E] rounded-3xl p-6 w-full max-w-sm space-y-4 shadow-2xl">
             <div className="flex justify-between items-center border-b border-[#282E3E] pb-3">
-              <span className="text-[10px] text-[#E5B800] uppercase font-bold">VVIP Table Booking</span>
-              <button onClick={() => setIsModalOpen(false)} className="text-[#828B9E] hover:text-white"><X size={18} /></button>
+              <span className="text-[10px] text-[#E5B800] uppercase font-bold">
+                VVIP Table Booking
+              </span>
+              <button
+                onClick={() => setIsModalOpen(false)}
+                className="text-[#828B9E] hover:text-white"
+              >
+                <X size={18} />
+              </button>
             </div>
+            {selectedTable.image && (
+              <img
+                src={selectedTable.image}
+                alt={selectedTable.name}
+                className="w-full h-28 rounded-2xl object-cover border border-[#282E3E]"
+              />
+            )}
             <div className="flex justify-between items-center">
-              <h3 className="text-base font-serif font-black text-white">{selectedTable.name}</h3>
+              <div>
+                <h3 className="text-base font-serif font-black text-white">{selectedTable.name}</h3>
+                {selectedTable.desc && (
+                  <p className="text-[10px] text-[#828B9E]">{selectedTable.desc}</p>
+                )}
+              </div>
               <span className="text-base font-black text-[#E5B800]">{selectedTable.price}</span>
             </div>
             <form onSubmit={handleConfirmReservation} className="space-y-3 text-xs">
               <div>
-                <label className="text-[10px] font-bold text-[#828B9E] uppercase block mb-1">Guests</label>
-                <select value={guestCount} onChange={(e) => setGuestCount(e.target.value)} className="w-full bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]">
+                <label className="text-[10px] font-bold text-[#828B9E] uppercase block mb-1">
+                  Guests
+                </label>
+                <select
+                  value={guestCount}
+                  onChange={(e) => setGuestCount(e.target.value)}
+                  className="w-full bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]"
+                >
                   <option value="2-4 Guests">2-4 Guests</option>
                   <option value="4-6 Guests">4-6 Guests</option>
                   <option value="8-10 Guests">8-10 Guests (VVIP Booth)</option>
@@ -445,19 +881,42 @@ function VenueDetailContent() {
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10px] font-bold text-[#828B9E] uppercase block mb-1">Date</label>
-                  <input type="date" required value={bookingDate} onChange={(e) => setBookingDate(e.target.value)} className="w-full bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]" />
+                  <label className="text-[10px] font-bold text-[#828B9E] uppercase block mb-1">
+                    Date
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={bookingDate}
+                    onChange={(e) => setBookingDate(e.target.value)}
+                    className="w-full bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]"
+                  />
                 </div>
                 <div>
-                  <label className="text-[10px] font-bold text-[#828B9E] uppercase block mb-1">Time</label>
-                  <input type="time" required value={bookingTime} onChange={(e) => setBookingTime(e.target.value)} className="w-full bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]" />
+                  <label className="text-[10px] font-bold text-[#828B9E] uppercase block mb-1">
+                    Time
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={bookingTime}
+                    onChange={(e) => setBookingTime(e.target.value)}
+                    className="w-full bg-[#12141C] border border-[#282E3E] rounded-xl p-3 text-white focus:outline-none focus:border-[#E5B800]"
+                  />
                 </div>
               </div>
               <div className="pt-2 border-t border-[#282E3E] flex justify-between items-center">
-                <span className="text-[9px] uppercase text-[#828B9E] font-bold">Minimum Spend:</span>
+                <span className="text-[9px] uppercase text-[#828B9E] font-bold">
+                  Minimum Spend:
+                </span>
                 <span className="text-base font-black text-[#E5B800]">{selectedTable.price}</span>
               </div>
-              <button type="submit" className="w-full bg-[#E5B800] hover:bg-[#d4a800] text-[#12141C] font-black text-xs py-3 rounded-xl uppercase tracking-wider transition shadow-lg">{t.confirmBooking}</button>
+              <button
+                type="submit"
+                className="w-full bg-[#E5B800] hover:bg-[#d4a800] text-[#12141C] font-black text-xs py-3 rounded-xl uppercase tracking-wider transition shadow-lg"
+              >
+                {t.confirmBooking}
+              </button>
             </form>
           </div>
         </div>
@@ -468,7 +927,13 @@ function VenueDetailContent() {
 
 export default function VenueDetailPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-[#111319] text-white flex items-center justify-center text-xs font-bold">Loading Venue...</div>}>
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-[#111319] text-white flex items-center justify-center text-xs font-bold">
+          Loading Venue...
+        </div>
+      }
+    >
       <VenueDetailContent />
     </Suspense>
   );
